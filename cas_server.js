@@ -1,181 +1,141 @@
-"use strict";
+var Fiber = Npm.require('fibers');
+var url = Npm.require('url');
+var CAS = Npm.require('cas');
+var https = Npm.require('https');
+var xml2js = Npm.require('xml2js');
 
-const Fiber = Npm.require('fibers');
-const https = Npm.require('https');
-const url = Npm.require('url');
-const xmlParser = Npm.require('xml2js');
+var _casCredentialTokens = {};
 
-// Library
-class CAS {
-  constructor(options) {
-    options = options || {};
-
-    if (!options.validate_url) {
-      throw new Error('Required CAS option `validateUrl` missing.');
-    }
-
-    if (!options.service) {
-      throw new Error('Required CAS option `service` missing.');
-    }
-
-    const cas_url = url.parse(options.validate_url);
-    if (cas_url.protocol != 'https:' ) {
-      throw new Error('Only https CAS servers are supported.');
-    } else if (!cas_url.hostname) {
-      throw new Error('Option `validateUrl` must be a valid url like: https://example.com/cas/serviceValidate');
-    } else {
-      this.hostname = cas_url.host;
-      this.port = 443;// Should be 443 for https
-      this.validate_path = cas_url.pathname;
-    }
-
-    this.service = options.service;
-  }
-
-  validate(ticket, callback) {
-    const httparams = {
-      host: this.hostname,
-      port: this.port,
-      path: url.format({
-        pathname: this.validate_path,
-        query: {ticket: ticket, service: this.service},
-      }),
-    };
-
-    https.get(httparams, (res) => {
-      res.on('error', (e) => {
-        console.log('error' + e);
-        callback(e);
-      });
-
-      // Read result
-      res.setEncoding('utf8');
-      let response = '';
-      res.on('data', (chunk) => {
-        response += chunk;
-      });
-
-      res.on('end', (error) => {
-        if (error) {
-          console.log('error callback');
-          console.log(error);
-          callback(undefined, false);
-        } else {
-          xmlParser.parseString(response, (err, result) => {
-            if (err) {
-              console.log('Bad response format.');
-              callback({message: 'Bad response format. XML could not parse it'});
-            } else {
-              if (result['cas:serviceResponse'] == null) {
-                console.log('Empty response.');
-                callback({message: 'Empty response.'});
-              }
-              if (result['cas:serviceResponse']['cas:authenticationSuccess']) {
-                var userData = {
-                  id: result['cas:serviceResponse']['cas:authenticationSuccess'][0]['cas:user'][0].toLowerCase(),
-                }
-                const attributes = result['cas:serviceResponse']['cas:authenticationSuccess'][0]['cas:attributes'][0];
-                for (var fieldName in attributes) {
-                  userData[fieldName] = attributes[fieldName][0];
-                };
-                callback(undefined, true, userData);
-              } else {
-                callback(undefined, false);
-              }
-            }
-          });
-        }
-      });
-    });
-  }
-}
-////// END OF CAS MODULE
-
-let _casCredentialTokens = {};
-let _userData = {};
-
-//RoutePolicy.declare('/_cas/', 'network');
+RoutePolicy.declare('/_cas/', 'network');
 
 // Listen to incoming OAuth http requests
-WebApp.connectHandlers.use((req, res, next) => {
+WebApp.connectHandlers.use(function(req, res, next) {
   // Need to create a Fiber since we're using synchronous http calls and nothing
   // else is wrapping this in a fiber automatically
-
-  Fiber(() => {
+  Fiber(function () {
     middleware(req, res, next);
   }).run();
 });
 
-const middleware = (req, res, next) => {
+middleware = function (req, res, next) {
   // Make sure to catch any exceptions because otherwise we'd crash
   // the runner
   try {
-    urlParsed = url.parse(req.url, true);
+    var barePath = req.url.substring(0, req.url.indexOf('?'));
+    var splitPath = barePath.split('/');
 
-    // Getting the ticket (if it's defined in GET-params)
-    // If no ticket, then request will continue down the default
+    // Any non-cas request will continue down the default
     // middlewares.
-    const query = urlParsed.query;
-    if (query == null) {
+    if (splitPath[1] !== '_cas') {
       next();
       return;
     }
-    const ticket = query.ticket;
-    if (ticket == null) {
-      next();
-      return;
-    }
-
-    const serviceUrl = Meteor.absoluteUrl(urlParsed.href.replace(/^\//g, '')).replace(/([&?])ticket=[^&]+[&]?/g, '$1').replace(/[?&]+$/g, '');
-    const redirectUrl = serviceUrl;//.replace(/([&?])casToken=[^&]+[&]?/g, '$1').replace(/[?&]+$/g, '');
 
     // get auth token
-    const credentialToken = query.casToken;
+    var credentialToken = splitPath[2];
     if (!credentialToken) {
-      end(res, redirectUrl);
+      closePopup(res);
       return;
     }
 
     // validate ticket
-    casValidate(req, ticket, credentialToken, serviceUrl, () => {
-      end(res, redirectUrl);
+    casTicket(req, credentialToken, function() {
+      closePopup(res);
     });
 
   } catch (err) {
     console.log("account-cas: unexpected error : " + err.message);
-    end(res, redirectUrl);
+    closePopup(res);
   }
 };
 
-const casValidate = (req, ticket, token, service, callback) => {
+var casTicket = function (req, token, callback) {
   // get configuration
-  if (!Meteor.settings.cas/* || !Meteor.settings.cas.validate*/) {
-    throw new Error('accounts-cas: unable to get configuration.');
+  if (!Meteor.settings.cas && !Meteor.settings.cas.validate) {
+    console.log("accounts-cas: unable to get configuration");
+    callback();
   }
 
-  const cas = new CAS({
-    validate_url: Meteor.settings.cas.validateUrl,
-    service: service,
-    version: Meteor.settings.cas.casVersion
+  // get ticket and validate.
+  var parsedUrl = url.parse(req.url, true);
+  var ticketId = parsedUrl.query.ticket;
+
+  var cas = new CAS({
+    base_url: Meteor.settings.cas.baseUrl,
+    service: 'http://localhost:3000/_cas/' + token
   });
 
-  cas.validate(ticket, (err, status, userData) => {
+  validate(cas, ticketId, function(err, status, username) {
     if (err) {
-      console.log("accounts-cas: error when trying to validate " + err);
-      console.log(err);
+      console.log("accounts-cas: error when trying to validate " + JSON.stringify(err));
     } else {
       if (status) {
-        console.log("accounts-cas: user validated " + userData.id);
-        _casCredentialTokens[token] = { id: userData.id };
-        _userData = userData;
+        console.log("accounts-cas: user validated " + username);
+        _casCredentialTokens[token] = { id: username };
       } else {
-        console.log("accounts-cas: unable to validate " + ticket);
+        console.log("accounts-cas: unable to validate " + ticketId);
       }
     }
+
     callback();
   });
 
   return;
+};
+
+var validate = function(cas, ticket, callback) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
+  var req = https.get({
+    host: cas.hostname,
+    path: url.format({
+      pathname: cas.base_path + '/validate',
+      query: {
+        ticket: ticket, service: cas.service
+      }
+    })
+  }, function(res) {
+    // Handle server errors
+    res.on('error', function(e) {
+      callback(e);
+    });
+
+    // Read result
+    res.setEncoding('utf8');
+    var response = '';
+
+    res.on('data', function(chunk) {
+      response += chunk;
+    });
+
+    res.on('end', function() {
+      xml2js.parseString(response, (error, result) => {
+        if (error) {
+          callback({message: 'Bad response format.'});
+          return;
+        }
+
+        try {
+          var user = result['cas:serviceResponse']['cas:authenticationSuccess'][0]['cas:user'][0];
+
+          if (user) {
+            callback(undefined, true, user);
+            return;
+          }
+          else {
+            callback(undefined, false);
+            return;
+          }
+        }
+        catch (e) {
+          callback({message: 'Bad response format.'});
+        }
+
+        // Format was not correct, error
+        callback({message: 'Bad response format.'});
+      });
+    });
+  });
 };
 
 /*
@@ -183,7 +143,7 @@ const casValidate = (req, ticket, token, service, callback) => {
  * It is call after Accounts.callLoginMethod() is call from client.
  *
  */
- Accounts.registerLoginHandler((options) => {
+ Accounts.registerLoginHandler(function (options) {
   if (!options.cas)
     return undefined;
 
@@ -192,48 +152,28 @@ const casValidate = (req, ticket, token, service, callback) => {
       'no matching login attempt found');
   }
 
-  const result = _retrieveCredential(options.cas.credentialToken);
+  var result = _retrieveCredential(options.cas.credentialToken);
+  var options = { profile: { name: result.id } };
+  var user = Accounts.updateOrCreateUserFromExternalService("cas", result, options);
 
-  options = { profile: _userData };
-  const queryResult = Accounts.updateOrCreateUserFromExternalService("cas", result, options);
-  //Roles.setUserRoles(queryResult.userId, 'user');
-
-  return queryResult;
+  return user;
 });
 
-const _hasCredential = (credentialToken) => {
+var _hasCredential = function(credentialToken) {
   return _.has(_casCredentialTokens, credentialToken);
 }
 
 /*
  * Retrieve token and delete it to avoid replaying it.
  */
-const _retrieveCredential = (credentialToken) => {
-  const result = _casCredentialTokens[credentialToken];
+var _retrieveCredential = function(credentialToken) {
+  var result = _casCredentialTokens[credentialToken];
   delete _casCredentialTokens[credentialToken];
   return result;
 }
 
-const closePopup = (res) => {
-  if (Meteor.settings.cas && Meteor.settings.cas.popup == false) {
-    return;
-  }
+var closePopup = function(res) {
   res.writeHead(200, {'Content-Type': 'text/html'});
-  const content = '<html><body><div id="popupCanBeClosed"></div></body></html>';
+  var content = '<html><body><div id="popupCanBeClosed"></div></body></html>';
   res.end(content, 'utf-8');
-}
-
-const redirect = (res, whereTo) => {
-  res.writeHead(302, {'Location': whereTo});
-  const content = '<html><head><meta http-equiv="refresh" content="0; url='+whereTo+'" /></head><body>Redirection to <a href='+whereTo+'>'+whereTo+'</a></body></html>';
-  res.end(content, 'utf-8');
-  return
-}
-
-const end = (res, whereTo) => {
-  if (Meteor.settings.cas && Meteor.settings.cas.popup == false) {
-    redirect(res, whereTo);
-  } else {
-    closePopup(res);
-  }
 }

@@ -1,6 +1,6 @@
 Package.describe({
   summary: "CAS support for accounts",
-  version: "0.0.7",
+  version: "0.0.8",
   name: "jackstone:accounts-cas",
   git: "https://github.com/jackstonedev/meteor-accounts-cas"
 });
@@ -21,8 +21,8 @@ Package.onUse(function(api) {
 });
 
 Npm.depends({
-  xml2js: "0.4.17",
-  cas: "https://github.com/anrizal/node-cas/tarball/2baed530842e7a437f8f71b9346bcac8e84773cc"
+  cas: "0.0.3",
+  xml2js: "0.4.19"
 });
 
 Cordova.depends({
