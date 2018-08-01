@@ -62,7 +62,7 @@ var casTicket = function (req, token, callback) {
 
   var cas = new CAS({
     base_url: Meteor.settings.cas.baseUrl,
-    service: 'http://localhost:3000/_cas/' + token
+    service: Meteor.absoluteUrl() + '/_cas/' + token
   });
 
   validate(cas, ticketId, function(err, status, username) {
@@ -84,8 +84,6 @@ var casTicket = function (req, token, callback) {
 };
 
 var validate = function(cas, ticket, callback) {
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
   var req = https.get({
     host: cas.hostname,
     path: url.format({

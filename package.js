@@ -1,6 +1,6 @@
 Package.describe({
   summary: "CAS support for accounts",
-  version: "0.0.8",
+  version: "0.0.9",
   name: "jackstone:accounts-cas",
   git: "https://github.com/jackstonedev/meteor-accounts-cas"
 });
