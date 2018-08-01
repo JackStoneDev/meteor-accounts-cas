@@ -62,7 +62,7 @@ var casTicket = function (req, token, callback) {
 
   var cas = new CAS({
     base_url: Meteor.settings.cas.baseUrl,
-    service: Meteor.absoluteUrl() + '/_cas/' + token
+    service: Meteor.absoluteUrl() + '_cas/' + token
   });
 
   validate(cas, ticketId, function(err, status, username) {
